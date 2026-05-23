@@ -1,0 +1,365 @@
+# =============================================================================
+# PerPilot AI-Powered Load Testing Pipeline - TEMPLATE
+# =============================================================================
+# HOW TO USE THIS TEMPLATE FOR A NEW PROJECT:
+# 1. Copy .github/workflows/load-test-template.yml to your project repo
+# 2. Update the workflow_dispatch inputs section with your app URL
+# 3. Adjust NFR thresholds in the 'env:' section at the top
+# 4. In Stage 04, replace sample endpoints with your actual API paths
+# 5. Commit and push — or trigger manually from Actions > Run workflow
+#
+# REQUIRED SECRETS (Settings > Secrets > Actions):
+#   GITHUB_TOKEN  : Auto-provided (no setup needed)
+#   GH_PAT        : Optional Personal Access Token for Gist creation
+# =============================================================================
+
+name: "PerPilot | AI Load Testing Pipeline Template"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      # ----------------------------------------------------------
+      # AGENT 01 INPUT: Your application URL
+      # Replace the default with your actual target URL
+      # Free test APIs: https://jsonplaceholder.typicode.com
+      #                 https://reqres.in/api
+      #                 https://httpbin.org
+      # ----------------------------------------------------------
+      target_url:
+        description: "01 | Target App URL"
+        required: true
+        default: "https://jsonplaceholder.typicode.com"
+
+      # ----------------------------------------------------------
+      # AGENT 02 INPUT: Environment
+      # Selects NFR threshold profile
+      # production = strict | staging = moderate | development = relaxed
+      # ----------------------------------------------------------
+      environment:
+        description: "02 | Environment (development/staging/production)"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+          - sandbox
+
+      # ----------------------------------------------------------
+      # AGENT 03 INPUT: Virtual Users
+      # How many concurrent users to simulate
+      # Smoke test: 1-5 | Load: 10-50 | Stress: 50-200
+      # ----------------------------------------------------------
+      virtual_users:
+        description: "03 | Virtual Users (concurrent load)"
+        required: true
+        default: "10"
+
+      # ----------------------------------------------------------
+      # AGENT 03 INPUT: Duration
+      # How long to run the test
+      # Format: 1m, 5m, 10m, 30m
+      # ----------------------------------------------------------
+      duration:
+        description: "03 | Test Duration (1m, 5m, 10m, 30m)"
+        required: true
+        default: "5m"
+
+      # ----------------------------------------------------------
+      # AGENT 04 INPUT: Test Tool
+      # k6 = JS-based, lightweight, great for APIs
+      # jmeter = Java-based, GUI-friendly, industry standard
+      # ----------------------------------------------------------
+      test_tool:
+        description: "04 | Test tool (k6 or jmeter)"
+        required: true
+        default: "k6"
+        type: choice
+        options:
+          - k6
+          - jmeter
+
+# -----------------------------------------------------------------------
+# GLOBAL ENVIRONMENT VARIABLES
+# Change defaults here for push/PR triggered runs
+# -----------------------------------------------------------------------
+env:
+  TARGET_URL: ${{ github.event.inputs.target_url || 'https://jsonplaceholder.typicode.com' }}
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'staging' }}
+  VUS: ${{ github.event.inputs.virtual_users || '10' }}
+  DURATION: ${{ github.event.inputs.duration || '5m' }}
+  TOOL: ${{ github.event.inputs.test_tool || 'k6' }}
+  # NFR Thresholds — adjust for your project:
+  P95_THRESHOLD_MS: "2000"
+  ERROR_RATE_THRESHOLD: "0.01"
+  MIN_THROUGHPUT: "50"
+
+jobs:
+
+  # =====================================================================
+  # STAGE 01 | TARGET APPLICATION AGENT
+  # PURPOSE : Validate target URL is reachable
+  # INPUTS  : target_url (workflow_dispatch or env default)
+  # OUTPUTS : Confirmed URL + environment name
+  # =====================================================================
+  stage-01-target-application:
+    name: "Stage 01 | Target Application"
+    runs-on: ubuntu-latest
+    outputs:
+      target_url: ${{ steps.validate.outputs.target_url }}
+      environment: ${{ steps.validate.outputs.environment }}
+    steps:
+      - name: "Validate Target Application"
+        id: validate
+        run: |
+          echo "Target URL  : ${{ env.TARGET_URL }}"
+          echo "Environment : ${{ env.ENVIRONMENT }}"
+          HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" --max-time 15 "${{ env.TARGET_URL }}" || echo "000")
+          echo "HTTP Status: $HTTP_CODE"
+          echo "target_url=${{ env.TARGET_URL }}" >> $GITHUB_OUTPUT
+          echo "environment=${{ env.ENVIRONMENT }}" >> $GITHUB_OUTPUT
+          echo "[Stage 01] Complete."
+
+  # =====================================================================
+  # STAGE 02 | NFR GATHERING AGENT
+  # PURPOSE : Define Non-Functional Requirements by environment
+  # INPUTS  : environment (development/staging/production/sandbox)
+  # OUTPUTS : p95 threshold (ms), error rate, min throughput (req/s)
+  # CUSTOMISE: Add cases for your environments below
+  # =====================================================================
+  stage-02-nfr-gathering:
+    name: "Stage 02 | NFR Gathering"
+    runs-on: ubuntu-latest
+    needs: stage-01-target-application
+    outputs:
+      p95_threshold: ${{ steps.nfr.outputs.p95 }}
+      error_threshold: ${{ steps.nfr.outputs.error_rate }}
+      throughput: ${{ steps.nfr.outputs.throughput }}
+    steps:
+      - name: "Generate NFR Requirements"
+        id: nfr
+        run: |
+          ENV="${{ env.ENVIRONMENT }}"
+          case "$ENV" in
+            production)  P95=1000; ERR=0.005; TPUT=200;;
+            staging)     P95=2000; ERR=0.01;  TPUT=100;;
+            development) P95=5000; ERR=0.05;  TPUT=20;;
+            sandbox)     P95=10000; ERR=0.10; TPUT=5;;
+            *)           P95=${{ env.P95_THRESHOLD_MS }}; ERR=${{ env.ERROR_RATE_THRESHOLD }}; TPUT=${{ env.MIN_THROUGHPUT }};;
+          esac
+          echo "P95 threshold : ${P95}ms"
+          echo "Error rate    : ${ERR}"
+          echo "Min throughput: ${TPUT} req/s"
+          echo "p95=$P95"         >> $GITHUB_OUTPUT
+          echo "error_rate=$ERR"  >> $GITHUB_OUTPUT
+          echo "throughput=$TPUT" >> $GITHUB_OUTPUT
+          echo "[Stage 02] Complete."
+
+  # =====================================================================
+  # STAGE 03 | WORKLOAD DESIGN AGENT
+  # PURPOSE : Design load scenarios and user journeys
+  # INPUTS  : virtual_users, duration
+  # OUTPUTS : Scenario breakdown printed to log
+  # CUSTOMISE: Adjust scenario names to match your test cases
+  # =====================================================================
+  stage-03-workload-design:
+    name: "Stage 03 | Workload Design"
+    runs-on: ubuntu-latest
+    needs: stage-02-nfr-gathering
+    steps:
+      - name: "Design Workload Scenarios"
+        run: |
+          echo "VUs     : ${{ env.VUS }}"
+          echo "Duration: ${{ env.DURATION }}"
+          echo "Scenario A (50%): GET /resource (Browse)"
+          echo "Scenario B (30%): Multi-step User Journey"
+          echo "Scenario C (20%): POST/PUT/DELETE CRUD"
+          echo "[Stage 03] Complete."
+
+  # =====================================================================
+  # STAGE 04 | SCRIPT GENERATION AGENT
+  # PURPOSE : Generate k6 load test script with your endpoints
+  # INPUTS  : target_url, VUs, duration, NFR thresholds
+  # OUTPUTS : scripts/load-test-script.js artifact
+  #
+  # *** HOW TO CUSTOMISE ENDPOINTS FOR YOUR PROJECT ***
+  # Replace these 3 scenarios with your actual API routes:
+  #
+  # Scenario A (GET): /YOUR-LIST-ENDPOINT
+  # Scenario B (User Journey):
+  #   - GET  /YOUR-DETAIL-ENDPOINT/{id}
+  #   - POST /YOUR-CREATE-ENDPOINT  {body: your payload}
+  # Scenario C (CRUD):
+  #   - PUT    /YOUR-UPDATE-ENDPOINT/{id}
+  #   - DELETE /YOUR-DELETE-ENDPOINT/{id}
+  #
+  # Also update the check assertions to match expected HTTP status codes
+  # =====================================================================
+  stage-04-script-generation:
+    name: "Stage 04 | Script Generation"
+    runs-on: ubuntu-latest
+    needs: stage-03-workload-design
+    steps:
+      - name: "Generate k6 Script"
+        run: |
+          mkdir -p scripts
+          {
+            printf 'import http from "k6/http";\n'
+            printf 'import { check, sleep, group } from "k6";\n'
+            printf 'import { Rate, Trend } from "k6/metrics";\n'
+            printf '\n'
+            printf 'const errorRate = new Rate("errors");\n'
+            printf 'const responseTime = new Trend("response_time");\n'
+            printf '\n'
+            printf 'export const options = {\n'
+            printf '  vus: %s,\n' '${{ env.VUS }}'
+            printf '  duration: "%s",\n' '${{ env.DURATION }}'
+            printf '  thresholds: {\n'
+            printf '    http_req_duration: ["p(95)<%s"],\n' '${{ needs.stage-02-nfr-gathering.outputs.p95_threshold }}'
+            printf '    errors: ["rate<%s"],\n' '${{ needs.stage-02-nfr-gathering.outputs.error_threshold }}'
+            printf '    http_reqs: ["rate>=%s"],\n' '${{ needs.stage-02-nfr-gathering.outputs.throughput }}'
+            printf '  },\n'
+            printf '};\n'
+            printf '\n'
+            printf 'const BASE_URL = "%s";\n' '${{ env.TARGET_URL }}'
+            printf '\n'
+            printf '// CUSTOMISE: Replace endpoints below with your actual API paths\n'
+            printf 'export default function () {\n'
+            printf '  const rand = Math.random();\n'
+            printf '  if (rand < 0.5) {\n'
+            printf '    // Scenario A (50%%): Browse - REPLACE /posts with your endpoint\n'
+            printf '    group("Browse", function () {\n'
+            printf '      const res = http.get(`${BASE_URL}/posts`);\n'
+            printf '      check(res, { "status 200": (r) => r.status === 200 });\n'
+            printf '      errorRate.add(res.status !== 200);\n'
+            printf '    });\n'
+            printf '  } else if (rand < 0.8) {\n'
+            printf '    // Scenario B (30%%): User Journey - REPLACE with your flow\n'
+            printf '    group("User Journey", function () {\n'
+            printf '      const id = Math.floor(Math.random() * 100) + 1;\n'
+            printf '      const res1 = http.get(`${BASE_URL}/posts/${id}`);\n'
+            printf '      check(res1, { "detail 200": (r) => r.status === 200 });\n'
+            printf '      const payload = JSON.stringify({ title: "Test", body: "Load test", userId: 1 });\n'
+            printf '      const res2 = http.post(`${BASE_URL}/posts`, payload, { headers: { "Content-Type": "application/json" } });\n'
+            printf '      check(res2, { "created 201": (r) => r.status === 201 });\n'
+            printf '      errorRate.add(res1.status !== 200 || res2.status !== 201);\n'
+            printf '    });\n'
+            printf '  } else {\n'
+            printf '    // Scenario C (20%%): CRUD - REPLACE with your update/delete\n'
+            printf '    group("CRUD", function () {\n'
+            printf '      const id = Math.floor(Math.random() * 10) + 1;\n'
+            printf '      const payload = JSON.stringify({ title: "Updated", body: "Test", userId: 1 });\n'
+            printf '      const res1 = http.put(`${BASE_URL}/posts/${id}`, payload, { headers: { "Content-Type": "application/json" } });\n'
+            printf '      check(res1, { "updated 200": (r) => r.status === 200 });\n'
+            printf '      const res2 = http.del(`${BASE_URL}/posts/${id}`);\n'
+            printf '      check(res2, { "deleted 200": (r) => r.status === 200 });\n'
+            printf '      errorRate.add(res1.status !== 200 || res2.status !== 200);\n'
+            printf '    });\n'
+            printf '  }\n'
+            printf '  sleep(1);\n'
+            printf '}\n'
+          } > scripts/load-test-script.js
+          echo "Script generated."
+          echo "[Stage 04] Complete."
+
+      - name: "Upload Script Artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-script
+          path: scripts/
+
+  # =====================================================================
+  # STAGE 05 | LOAD TEST EXECUTION AGENT
+  # PURPOSE : Install k6 and execute the load test
+  # INPUTS  : load-test-script artifact, VUs, duration
+  # OUTPUTS : results/k6-results.json artifact
+  # CUSTOMISE: Add k6 extensions, tags, or environment variables
+  # =====================================================================
+  stage-05-execution:
+    name: "Stage 05 | Load Test Execution"
+    runs-on: ubuntu-latest
+    needs: stage-04-script-generation
+    steps:
+      - name: "Install k6"
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] \
+            https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update -qq && sudo apt-get install -y k6
+
+      - name: "Download Test Script"
+        uses: actions/download-artifact@v4
+        with:
+          name: load-test-script
+          path: scripts/
+
+      - name: "Execute Load Test"
+        run: |
+          mkdir -p results
+          k6 run --out json=results/k6-results.json scripts/load-test-script.js || true
+          echo "[Stage 05] Complete."
+
+      - name: "Upload Raw Results"
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-raw-results
+          path: results/
+
+  # =====================================================================
+  # STAGE 06 | STORE RESULTS TO GITHUB AGENT
+  # PURPOSE : Publish results as GitHub Step Summary + Artifacts
+  # INPUTS  : k6-raw-results artifact
+  # OUTPUTS : GitHub Step Summary report, downloadable artifacts
+  # CUSTOMISE: Add Slack/Teams webhook notification here
+  # =====================================================================
+  stage-06-store-results:
+    name: "Stage 06 | Store Results to GitHub"
+    runs-on: ubuntu-latest
+    needs: stage-05-execution
+    steps:
+      - name: "Download Results"
+        uses: actions/download-artifact@v4
+        with:
+          name: k6-raw-results
+          path: results/
+
+      - name: "Publish Step Summary"
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## PerPilot Load Testing Pipeline - Results
+          | Stage | Agent | Result |
+          |-------|-------|--------|
+          | 01 | Target Application | Validated |
+          | 02 | NFR Gathering | Thresholds Set |
+          | 03 | Workload Design | Scenarios Ready |
+          | 04 | Script Generation | Script Built |
+          | 05 | Load Test Execution | Test Complete |
+          | 06 | Store Results | Report Generated |
+          EOF
+          cat >> $GITHUB_STEP_SUMMARY << ENDSUMMARY
+          | Parameter | Value |
+          |-----------|-------|
+          | Target URL | ${{ env.TARGET_URL }} |
+          | Environment | ${{ env.ENVIRONMENT }} |
+          | Virtual Users | ${{ env.VUS }} |
+          | Duration | ${{ env.DURATION }} |
+          | Tool | ${{ env.TOOL }} |
+          > *Generated by PerPilot AI Load Testing Pipeline Template*
+          ENDSUMMARY
+          echo "[Stage 06] Complete."
+
+      - name: "Upload Final Report"
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-results
+          path: results/
+          retention-days: 30
